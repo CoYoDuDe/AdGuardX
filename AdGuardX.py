@@ -511,13 +511,11 @@ def teste_domains_batch(domains):
     """Testet eine Liste von Domains in einem Batch mit dynamisch berechneten Ressourcen."""
     results = {}
     resolver_index = random.randint(0, len(CONFIG['dns_server_list']) - 1)
-    resolver = dns.resolver.Resolver()
-    resolver.nameservers = [CONFIG['dns_server_list'][resolver_index]]
-
-    batch_index = 0
     total_domains = len(domains)
+    batch_index = 0
 
     while batch_index < total_domains:
+        # Berechne dynamische Ressourcen
         batch_size = calculate_batch_size()
         max_jobs = calculate_dynamic_resources(total_domains)
         current_batch = domains[batch_index:batch_index + batch_size]
@@ -527,7 +525,7 @@ def teste_domains_batch(domains):
         with ThreadPoolExecutor(max_workers=max_jobs) as executor:
             futures = {executor.submit(test_single_or_batch, domain, resolver_index): domain for domain in current_batch}
 
-            for future in concurrent.futures.as_completed(futures):
+            for future_index, future in enumerate(concurrent.futures.as_completed(futures), start=1):
                 domain = futures[future]
                 try:
                     reachable = future.result()
@@ -541,8 +539,8 @@ def teste_domains_batch(domains):
                     results[domain] = False
 
                 # Fortschritts-Logging
-                if idx % CONFIG.get("progress_log_frequency", 1000) == 0:
-                    log(f"Fortschritt: {batch_index + idx}/{total_domains} Domains getestet", logging.INFO)
+                if future_index % CONFIG.get("progress_log_frequency", 1000) == 0:
+                    log(f"Fortschritt: {batch_index + future_index}/{total_domains} Domains getestet", logging.INFO)
 
         batch_index += batch_size
         log(f"Batch abgeschlossen: {batch_index} von {total_domains} Domains verarbeitet.", logging.INFO)
