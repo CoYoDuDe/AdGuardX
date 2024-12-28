@@ -47,8 +47,8 @@ LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 
 # Standardkonfiguration erstellen
 STANDARD_CONFIG = {
-    "log_datei": "/var/log/adguardx.log",
-    "send_email": True,
+    "log_datei": "/var/log/adblock.log",
+    "send_email": False,
     "email": "example@example.com",
     "email_absender": "no-reply@example.com",
     "max_retries": 3,
@@ -56,7 +56,7 @@ STANDARD_CONFIG = {
     "parallel_aktiviert": True,
     "max_parallel_jobs": 1,
     "batch_größe": 1000,
-    "dns_konfiguration": "/etc/dnsmasq.d/adguardx.conf",
+    "dns_konfiguration": "/var/log/adguardx.conf",
     "web_server_ipv4": "127.0.0.1",
     "web_server_ipv6": "::1",
     "github_upload": False,
@@ -214,18 +214,34 @@ def lade_domain_md5():
     except FileNotFoundError:
         return {}
 
+def sicher_speichern(dateipfad, inhalt, is_json=False):
+    """
+    Sicheres Speichern in eine Datei mit Fehlerbehandlung.
+
+    :param dateipfad: Pfad zur Datei
+    :param inhalt: Der Inhalt (String oder Python-Datenstruktur)
+    :param is_json: Gibt an, ob der Inhalt als JSON gespeichert werden soll
+    """
+    try:
+        with open(dateipfad, 'w') as file:
+            if is_json:
+                json.dump(inhalt, file, indent=4)
+            else:
+                file.write(inhalt)
+        log(f"Datei erfolgreich gespeichert: {dateipfad}", logging.INFO)
+    except Exception as e:
+        log(f"Fehler beim Speichern der Datei {dateipfad}: {e}", logging.ERROR)
+
 def speichere_domain_md5(domain_md5):
     """Speichert die domain_md5.json Datei."""
-    with open(os.path.join(skript_verzeichnis, 'tmp', 'domain_md5.json'), 'w') as json_datei:
-        json.dump(domain_md5, json_datei, indent=4)
+    sicher_speichern(os.path.join(skript_verzeichnis, 'tmp', 'domain_md5.json'), domain_md5, is_json=True)
 
 def speichere_liste_temporär(url, domains):
     """Speichert getestete Domains einer Liste temporär ab."""
     try:
         temp_path = os.path.join(skript_verzeichnis, 'tmp', f"{url.replace('://', '_').replace('/', '_')}.tmp")
-        with open(temp_path, 'w') as temp_file:
-            for domain in domains:
-                temp_file.write(f"{domain}\n")
+        inhalt = "\n".join(domains)
+        sicher_speichern(temp_path, inhalt)
         log(f"Liste {url} wurde temporär gespeichert.")
     except Exception as e:
         log(f"Fehler beim Speichern der temporären Liste {url}: {e}", logging.ERROR)
@@ -233,7 +249,9 @@ def speichere_liste_temporär(url, domains):
 def calculate_batch_size():
     """Berechnet die dynamische Batch-Größe basierend auf verfügbarem Speicher und Systemgrenzen."""
     free_memory = get_free_memory()
-    estimated_domains_per_batch = free_memory // 1024 // 70  # Schätzung: 70 Bytes pro Domain
+
+    # Schätzung: Jede Domain benötigt im Speicher ~70 Bytes (basierend auf typischen String-Längen und Overhead)
+    estimated_domains_per_batch = free_memory // 1024 // 70
     max_batch_size = CONFIG.get("batch_größe", 100)
     
     # Prüfen, ob die berechnete Größe sinnvoll ist
@@ -282,10 +300,11 @@ def calculate_dynamic_resources(domain_count, max_jobs=None):
 def erstelle_dnsmasq_conf(domains):
     """Erstellt die dnsmasq Konfigurationsdatei und startet dnsmasq nur bei Änderungen oder wenn die aktuelle Datei leer ist."""
     temp_conf_path = os.path.join(skript_verzeichnis, 'tmp', 'temp_adblock.conf')
-    with open(temp_conf_path, 'w') as conf_file:
-        for domain in sortiere_domains(domains):
-            conf_file.write(f"address=/{domain}/{CONFIG['web_server_ipv4']}\n")
-            conf_file.write(f"address=/{domain}/{CONFIG['web_server_ipv6']}\n")
+    inhalt = "\n".join(
+        f"address=/{domain}/{CONFIG['web_server_ipv4']}\naddress=/{domain}/{CONFIG['web_server_ipv6']}"
+        for domain in sortiere_domains(domains)
+    )
+    sicher_speichern(temp_conf_path, inhalt)
 
     # Prüfen, ob die aktuelle Konfiguration existiert und leer ist
     if not os.path.exists(CONFIG['dns_konfiguration']) or os.stat(CONFIG['dns_konfiguration']).st_size == 0:
@@ -308,13 +327,10 @@ def sortiere_domains(domains):
     return sorted(domains, key=lambda x: (x.split('.')[-1], x))
 
 def erstelle_hosts_datei(domains):
-    """Erstellt die Hosts-Datei."""
     log("Beginne mit der Erstellung der hosts.txt Datei")
     hosts_datei_pfad = os.path.join(skript_verzeichnis, 'hosts.txt')
-    with open(hosts_datei_pfad, 'w') as hosts_file:
-        for domain in sortiere_domains(domains):
-            hosts_file.write(f"0.0.0.0 {domain}\n")
-    log("Hosts-Datei erstellt")
+    inhalt = "\n".join(f"0.0.0.0 {domain}" for domain in sortiere_domains(domains))
+    sicher_speichern(hosts_datei_pfad, inhalt)
 
 # =============================================================================
 # 5. FORTSCHRITTS- UND KONFIGURATIONSMANAGEMENT
@@ -323,8 +339,7 @@ def erstelle_hosts_datei(domains):
 def speichere_fortschritt(daten, dateipfad="fortschritt.json"):
     """Speichert den Fortschritt in einer JSON-Datei."""
     try:
-        with open(os.path.join(skript_verzeichnis, dateipfad), 'w') as file:
-            json.dump(daten, file, indent=4)
+        sicher_speichern(os.path.join(skript_verzeichnis, dateipfad), daten, is_json=True)
         log(f"Fortschrittsdaten gespeichert in {dateipfad}.", logging.INFO)
     except Exception as e:
         log(f"Fehler beim Speichern der Fortschrittsdaten: {e}", logging.ERROR)
@@ -392,7 +407,11 @@ def fehler_beenden(nachricht):
     log(nachricht, logging.ERROR)
     STATISTIK["durchlauf_fehlgeschlagen"] = True
     STATISTIK["fehlermeldung"] = nachricht
-    sende_email("Fehler im AdBlock-Skript", erstelle_email_text())
+    if CONFIG.get("send_email", False):
+        try:
+            sende_email("Fehler im AdBlock-Skript", erstelle_email_text())
+        except Exception as e:
+            log(f"Fehler beim Senden der Fehler-E-Mail: {e}", logging.ERROR)
     exit(1)
 
 # =============================================================================
@@ -402,14 +421,8 @@ def fehler_beenden(nachricht):
 def erstelle_standard_datei(dateipfad, inhalt=None, leer=False):
     """Erstellt eine Datei mit Standardwerten oder leerem Inhalt, wenn sie nicht existiert."""
     if not os.path.exists(dateipfad):
-        with open(dateipfad, 'w') as datei:
-            if leer:
-                datei.write("")  # Leeren Inhalt schreiben
-            else:
-                if isinstance(inhalt, str):
-                    datei.write(inhalt)
-                else:
-                    json.dump(inhalt, datei, indent=4)
+        inhalt = "" if leer else inhalt
+        sicher_speichern(dateipfad, inhalt, is_json=not isinstance(inhalt, str))
 
 def initialisiere_verzeichnisse_und_dateien():
     """Überprüft und erstellt notwendige Verzeichnisse und Dateien."""
@@ -420,6 +433,7 @@ def initialisiere_verzeichnisse_und_dateien():
     erstelle_standard_datei(os.path.join(skript_verzeichnis, 'tmp', 'domain_md5.json'), {})
     erstelle_standard_datei(os.path.join(skript_verzeichnis, 'whitelist.txt'), leer=True)
     erstelle_standard_datei(os.path.join(skript_verzeichnis, 'blacklist.txt'), leer=True)
+    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'tmp', 'bewertung.json'), [])
 
 def bereinige_obsolete_dateien():
     """Bereinigt veraltete oder ungenutzte temporäre Dateien im tmp-Verzeichnis."""
@@ -577,22 +591,19 @@ def ist_gueltige_domain(domain):
 
 def test_dns_entry(domain, record_type='A'):
     """Testet einen spezifischen DNS-Eintragstyp für eine Domain mit Wiederholungslogik."""
-    try:
-        resolver = dns.resolver.Resolver()
-        resolver.nameservers = CONFIG['dns_server_list']
-        retries = CONFIG.get("max_retries", 3)
-        for versuch in range(retries):
-            try:
-                resolver.resolve(domain, record_type, lifetime=CONFIG.get('domain_timeout', 5))
-                return True
-            except (dns.resolver.Timeout, dns.resolver.NXDOMAIN) as e:
-                log(f"DNS-Fehler bei {domain} ({record_type}, Versuch {versuch+1}/{retries}): {e}", logging.DEBUG)
-                if versuch == retries - 1:
-                    return False
+    resolver = dns.resolver.Resolver()
+    resolver.nameservers = CONFIG['dns_server_list']
+    max_retries = CONFIG.get("max_retries", 3)  # Nutzen Sie den Wert aus der Konfiguration
+    for attempt in range(max_retries):
+        try:
+            resolver.resolve(domain, record_type, lifetime=CONFIG.get('domain_timeout', 5))
+            return True
+        except (dns.resolver.Timeout, dns.resolver.NXDOMAIN) as e:
+            log(f"DNS-Fehler bei {domain} (Versuch {attempt + 1}/{max_retries}): {e}", logging.DEBUG)
+            if attempt < max_retries - 1:
                 time.sleep(CONFIG.get("retry_delay", 2))
-    except Exception as e:
-        log(f"Allgemeiner Fehler beim Testen von {domain} ({record_type}): {e}", logging.DEBUG)
-        return False
+    log(f"DNS-Test für {domain} nach {max_retries} Versuchen fehlgeschlagen.", logging.DEBUG)
+    return False
 
 # =============================================================================
 # 9. BATCH-VERARBEITUNG UND DOMAIN-EXTRAKTION
@@ -612,7 +623,7 @@ def messen(func):
 def teste_domains_batch(domains):
     """
     Testet eine Liste von Domains in Batches, loggt Fortschritt und Ergebnisse
-    basierend auf der Batchgröße.
+    basierend auf der dynamisch berechneten Batchgröße.
     """
     results = {}
     resolver_index = random.randint(0, len(CONFIG['dns_server_list']) - 1)
@@ -622,7 +633,7 @@ def teste_domains_batch(domains):
     nicht_erreichbare_count = 0
 
     while batch_index < total_domains:
-        # Berechne dynamische Ressourcen
+        # Berechne die Batchgröße dynamisch
         batch_size = calculate_batch_size()
         max_jobs = calculate_dynamic_resources(total_domains)
         current_batch = domains[batch_index:batch_index + batch_size]
@@ -647,7 +658,7 @@ def teste_domains_batch(domains):
                     log(f"Fehler beim Testen der Domain {domain}: {e}", logging.DEBUG)
                     results[domain] = False
 
-        batch_index += batch_size
+        batch_index += len(current_batch)  # Inkrementiere um die tatsächliche Batchgröße
 
         # Fortschritts- und Ergebnis-Logging nach Abschluss des Batches
         log(
@@ -663,18 +674,20 @@ def teste_domains_batch(domains):
 
 def test_single_or_batch(domain, resolver_index):
     """Führt einen Domain-Test aus und fällt bei Fehlern auf einen anderen Resolver zurück."""
-    try:
-        return test_dns_entry(domain, 'A')
-    except Exception as e:
-        log(f"Fehler beim Testen der Domain {domain}: {e}. Wechsel auf anderen Resolver.", logging.WARNING)
-        new_resolver_index = (resolver_index + 1) % len(CONFIG['dns_server_list'])
+    retries = CONFIG.get("max_retries", 3)
+    for attempt in range(retries):
         try:
             resolver = dns.resolver.Resolver()
-            resolver.nameservers = [CONFIG['dns_server_list'][new_resolver_index]]
+            resolver.nameservers = [CONFIG['dns_server_list'][resolver_index]]
             return test_dns_entry(domain, 'A')
-        except Exception as second_error:
-            log(f"Zweiter Fehler beim Testen von {domain} mit anderem Resolver: {second_error}", logging.ERROR)
-            return False
+        except Exception as e:
+            log(f"Fehler beim Testen der Domain {domain} (Versuch {attempt + 1}/{retries}): {e}", logging.DEBUG)
+            # Wechsel zum nächsten Resolver
+            resolver_index = (resolver_index + 1) % len(CONFIG['dns_server_list'])
+            if attempt < retries - 1:
+                time.sleep(CONFIG.get("retry_delay", 2))
+    log(f"Domain {domain} konnte nach {retries} Versuchen nicht erfolgreich getestet werden.", logging.DEBUG)
+    return False
 
 # =============================================================================
 # 1. DATENVERARBEITUNG UND DUPLIKATMANAGEMENT
@@ -693,7 +706,7 @@ def entferne_duplikate_mit_prioritaet(domains_dict):
                 unique_domains.append(domain)
                 priorisierte_domains.add(domain)
         bearbeitete_domains_dict[url] = {"domains": unique_domains, "md5": data["md5"]}
-        STATISTIK["duplikate_pro_liste"][url] = len(domains) - len(unique_domains)
+        STATISTIK.setdefault("duplikate_pro_liste", defaultdict(int))[url] = len(domains) - len(unique_domains)
 
     return bearbeitete_domains_dict
 
@@ -711,33 +724,6 @@ def pruefe_und_entferne_leere_listen(domains_dict):
     return domains_dict
 
 # =============================================================================
-# 11. FORTSCHRITTSSPEICHERUNG
-# =============================================================================
-
-def speichere_fortschritt(daten, dateipfad="fortschritt.json"):
-    """Speichert den Fortschritt in einer JSON-Datei."""
-    try:
-        with open(os.path.join(skript_verzeichnis, dateipfad), 'w') as file:
-            json.dump(daten, file, indent=4)
-        log(f"Fortschrittsdaten gespeichert in {dateipfad}.", logging.INFO)
-    except Exception as e:
-        log(f"Fehler beim Speichern der Fortschrittsdaten: {e}", logging.ERROR)
-
-def lade_fortschritt(dateipfad="fortschritt.json"):
-    """Lädt den gespeicherten Fortschritt aus einer JSON-Datei."""
-    try:
-        with open(os.path.join(skript_verzeichnis, dateipfad), 'r') as file:
-            daten = json.load(file)
-        log(f"Fortschrittsdaten geladen aus {dateipfad}.", logging.INFO)
-        return daten
-    except FileNotFoundError:
-        log("Keine Fortschrittsdaten gefunden. Beginne neu.", logging.INFO)
-        return {}
-    except Exception as e:
-        log(f"Fehler beim Laden der Fortschrittsdaten: {e}", logging.ERROR)
-        return {}
-
-# =============================================================================
 # 12. BEWERTUNGS- UND STATISTIKFUNKTIONEN
 # =============================================================================
 
@@ -745,9 +731,10 @@ def bewerte_listen():
     """Bewertet die Hosts-Listen basierend auf den gesammelten Statistiken."""
     bewertung = []
     for url in STATISTIK["erreichbare_pro_liste"].keys():
-        erreichbar = STATISTIK["erreichbare_pro_liste"].get(url, 0)
-        nicht_erreichbar = STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0)
-        duplikate = STATISTIK["duplikate_pro_liste"].get(url, 0)
+        STATISTIK.setdefault("erreichbare_pro_liste", defaultdict(int))[url] += 1
+        STATISTIK.setdefault("nicht_erreichbare_pro_liste", defaultdict(int))[url] += 1
+        STATISTIK.setdefault("duplikate_pro_liste", defaultdict(int))[url] += 1
+
         gesamt = erreichbar + nicht_erreichbar
         effizient = erreichbar / gesamt if gesamt > 0 else 0
         wert = erreichbar - (duplikate + nicht_erreichbar)
@@ -761,15 +748,29 @@ def bewerte_listen():
             log(f"Liste {item[0]} wird entfernt, da sie ineffizient ist.")
             del STATISTIK["erreichbare_pro_liste"][item[0]]
 
-    STATISTIK["list_bewertung"] = bewertung
+    STATISTIK.setdefault("list_bewertung", []).extend(bewertung)
     return bewertung
 
-def speichere_bewertung():
-    """Speichert die Bewertung der Hosts-Listen in einer Datei."""
-    bewertung_datei = os.path.join(skript_verzeichnis, 'bewertung.json')
-    with open(bewertung_datei, 'w') as datei:
-        json.dump(STATISTIK["list_bewertung"], datei, indent=4)
-    log(f"Bewertung der Listen in {bewertung_datei} gespeichert.", logging.INFO)
+def speichere_bewertung(bewertung):
+    """Speichert die Bewertung der Hosts-Listen in der tmp/bewertung.json."""
+    bewertung_datei = os.path.join(skript_verzeichnis, 'tmp', 'bewertung.json')
+    sicher_speichern(bewertung_datei, bewertung, is_json=True)
+    log(f"Bewertung der Listen erfolgreich in {bewertung_datei} gespeichert.", logging.INFO)
+
+def lade_bewertung():
+    """Lädt die Bewertung der Hosts-Listen aus der tmp/bewertung.json."""
+    bewertung_datei = os.path.join(skript_verzeichnis, 'tmp', 'bewertung.json')
+    try:
+        with open(bewertung_datei, 'r') as file:
+            bewertung = json.load(file)
+        log(f"Bewertung der Listen erfolgreich aus {bewertung_datei} geladen.", logging.INFO)
+        return bewertung
+    except FileNotFoundError:
+        log(f"Keine Bewertung gefunden. Erstelle eine neue Bewertungsliste.", logging.INFO)
+        return []
+    except Exception as e:
+        log(f"Fehler beim Laden der Bewertung aus {bewertung_datei}: {e}", logging.ERROR)
+        return []
 
 # =============================================================================
 # 13. STATISTIKAKTUALISIERUNG UND EMAIL
@@ -785,7 +786,7 @@ def aktualisiere_gesamtstatistik():
         "duplikate": STATISTIK["duplikate"],
         "durchlauf_fehlgeschlagen": STATISTIK["durchlauf_fehlgeschlagen"]
     }
-    STATISTIK["gesamtstatistik"].append(laufstatistik)
+    STATISTIK.setdefault("gesamtstatistik", []).append(laufstatistik)
 
 def erstelle_email_text():
     """Erstellt den Text der E-Mail-Benachrichtigung."""
@@ -893,21 +894,18 @@ def hauptprozess():
         # Domains testen
         erreichbare_domains = set()
         nicht_erreichbare_domains = set()
-        batch_size = calculate_batch_size()
-        batches = [list(alle_domains)[i:i + batch_size] for i in range(0, len(alle_domains), batch_size)]
 
-        for batch_index, batch in enumerate(batches, start=1):
-            log(f"Starte Batch {batch_index}/{len(batches)}.", logging.INFO)
-            batch_results = teste_domains_batch(batch)
+        # Ergebnisse direkt in teste_domains_batch behandeln
+        batch_results = teste_domains_batch(list(alle_domains))
 
-            for domain, erreichbar in batch_results.items():
-                STATISTIK["getestete_domains"] += 1
-                if erreichbar:
-                    erreichbare_domains.add(domain)
-                    STATISTIK["erreichbare_domains"] += 1
-                else:
-                    nicht_erreichbare_domains.add(domain)
-                    STATISTIK["nicht_erreichbare_domains"] += 1
+        for domain, erreichbar in batch_results.items():
+            STATISTIK["getestete_domains"] += 1
+            if erreichbar:
+                erreichbare_domains.add(domain)
+                STATISTIK["erreichbare_domains"] += 1
+            else:
+                nicht_erreichbare_domains.add(domain)
+                STATISTIK["nicht_erreichbare_domains"] += 1
 
         log(f"Test abgeschlossen: {len(erreichbare_domains)} erreichbare Domains, {len(nicht_erreichbare_domains)} nicht erreichbar.")
 
@@ -921,8 +919,8 @@ def hauptprozess():
             upload_to_github()
 
         # Listen bewerten und speichern
-        bewerte_listen()
-        speichere_bewertung()
+        bewertung = bewerte_listen()
+        speichere_bewertung(bewertung)
 
         log("Hauptprozess erfolgreich abgeschlossen.", logging.INFO)
 
@@ -930,7 +928,8 @@ def hauptprozess():
         fehler_beenden(f"Unerwarteter Fehler im Hauptprozess: {e}")
 
     finally:
-        sende_email("AdBlock Skript abgeschlossen", erstelle_email_text())
+        if CONFIG.get("send_email", False):
+            sende_email("AdBlock Skript abgeschlossen", erstelle_email_text())
 
 # =============================================================================
 # 15. EINSTIEGSPUNKT
