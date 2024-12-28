@@ -166,6 +166,10 @@ Host github.com
 def upload_to_github():
     """Lädt die generierte Hosts-Datei auf das GitHub-Repository hoch."""
     try:
+        if not os.path.exists('hosts'):
+            log("Die Hosts-Datei fehlt. Upload wird übersprungen.", logging.WARNING)
+            return
+
         subprocess.run(['git', 'add', 'hosts'], check=True)
         subprocess.run(['git', 'commit', '-m', 'Automatische Aktualisierung der Hosts-Datei'], check=True)
         subprocess.run(['git', 'push', 'origin', CONFIG['github_branch']], check=True)
@@ -204,6 +208,116 @@ def get_free_memory():
 def berechne_md5(text):
     """Berechnet den MD5-Hash des gegebenen Textes."""
     return hashlib.md5(text.encode('utf-8')).hexdigest()
+
+def lade_domain_md5():
+    """Lädt die domain_md5.json Datei."""
+    try:
+        with open(os.path.join(skript_verzeichnis, 'tmp', 'domain_md5.json')) as json_datei:
+            return json.load(json_datei)
+    except FileNotFoundError:
+        return {}
+
+def speichere_domain_md5(domain_md5):
+    """Speichert die domain_md5.json Datei."""
+    with open(os.path.join(skript_verzeichnis, 'tmp', 'domain_md5.json'), 'w') as json_datei:
+        json.dump(domain_md5, json_datei, indent=4)
+
+def speichere_liste_temporär(url, domains):
+    """Speichert getestete Domains einer Liste temporär ab."""
+    try:
+        temp_path = os.path.join(skript_verzeichnis, 'tmp', f"{url.replace('://', '_').replace('/', '_')}.tmp")
+        with open(temp_path, 'w') as temp_file:
+            for domain in domains:
+                temp_file.write(f"{domain}\n")
+        log(f"Liste {url} wurde temporär gespeichert.")
+    except Exception as e:
+        log(f"Fehler beim Speichern der temporären Liste {url}: {e}", logging.ERROR)
+
+def calculate_batch_size():
+    """Berechnet die dynamische Batch-Größe basierend auf verfügbarem Speicher und Systemgrenzen."""
+    free_memory = get_free_memory()
+    estimated_domains_per_batch = free_memory // 1024 // 70  # Schätzung: 70 Bytes pro Domain
+    max_batch_size = CONFIG.get("batch_größe", 100)
+    
+    # Prüfen, ob die berechnete Größe sinnvoll ist
+    batch_size = max(1, min(max_batch_size, estimated_domains_per_batch))
+    if batch_size < max_batch_size:
+        log(f"Warnung: Batch-Größe reduziert auf {batch_size} basierend auf verfügbaren Ressourcen.", logging.WARNING)
+        log(f"Grund: Verfügbarer Speicher: {free_memory / (1024 * 1024):.2f} MB", logging.WARNING)
+    
+    # Ausgabe der Werte und Einschätzung
+    log(f"Berechneter verfügbarer Speicher: {free_memory / (1024 * 1024):.2f} MB", logging.DEBUG)
+    log(f"Geschätzte Domains pro Batch: {estimated_domains_per_batch}", logging.DEBUG)
+    log(f"Empfohlene Batch-Größe: {batch_size} (Maximal erlaubt: {max_batch_size})", logging.DEBUG)
+    if batch_size < max_batch_size:
+        log("Hinweis: Es könnte mehr Batch-Größe möglich sein, wenn die Ressourcenkonfiguration angepasst wird.", logging.DEBUG)
+
+    return batch_size
+
+def calculate_dynamic_resources(domain_count, max_jobs=None):
+    """Berechnet dynamisch die parallelen Jobs und gibt Empfehlungen basierend auf aktuellen Ressourcen."""
+    max_jobs = max_jobs or CONFIG.get('max_parallel_jobs', 10)
+
+    # Dynamische Ressourcenberechnung
+    cpu_load = get_cpu_load()
+    cpu_cores = os.cpu_count() or 1
+    free_memory = get_free_memory()
+
+    # Berechnung der maximal möglichen parallelen Jobs
+    max_jobs_by_cpu = max(1, int(cpu_cores / (cpu_load + 1)))
+    max_jobs_by_memory = max(1, int((free_memory * 0.75) / (domain_count * 70)))  # 70 Bytes pro Domain
+    max_parallel_jobs = min(max_jobs_by_cpu, max_jobs_by_memory, max_jobs)
+
+    # Ausgabe der Werte und Einschätzung
+    log(f"Aktuelle CPU-Auslastung: {cpu_load:.2f}, verfügbare CPU-Kerne: {cpu_cores}", logging.DEBUG)
+    log(f"Verfügbarer Speicher: {free_memory / (1024 * 1024):.2f} MB")
+    log(f"Berechnete parallele Jobs basierend auf CPU: {max_jobs_by_cpu}", logging.DEBUG)
+    log(f"Berechnete parallele Jobs basierend auf Speicher: {max_jobs_by_memory}", logging.DEBUG)
+    log(f"Empfohlene parallele Jobs: {max_parallel_jobs} (Maximal erlaubt: {max_jobs})", logging.DEBUG)
+
+    # Warnung ausgeben, wenn die parallelen Jobs reduziert wurden
+    if max_parallel_jobs < max_jobs:
+        log(f"Warnung: Parallele Jobs reduziert auf {max_parallel_jobs} basierend auf aktuellen Ressourcen.", logging.DEBUG)
+        log("Hinweis: Es könnten mehr parallele Jobs möglich sein, wenn die Ressourcenkonfiguration angepasst wird.", logging.DEBUG)
+
+    return max_parallel_jobs
+
+def erstelle_dnsmasq_conf(domains):
+    """Erstellt die dnsmasq Konfigurationsdatei und startet dnsmasq nur bei Änderungen oder wenn die aktuelle Datei leer ist."""
+    temp_conf_path = os.path.join(skript_verzeichnis, 'tmp', 'temp_adblock.conf')
+    with open(temp_conf_path, 'w') as conf_file:
+        for domain in sortiere_domains(domains):
+            conf_file.write(f"address=/{domain}/{CONFIG['web_server_ipv4']}\n")
+            conf_file.write(f"address=/{domain}/{CONFIG['web_server_ipv6']}\n")
+
+    # Prüfen, ob die aktuelle Konfiguration existiert und leer ist
+    if not os.path.exists(CONFIG['dns_konfiguration']) or os.stat(CONFIG['dns_konfiguration']).st_size == 0:
+        log("Aktuelle dnsmasq-Konfiguration fehlt oder ist leer. Erstelle neu und starte dnsmasq.")
+        os.replace(temp_conf_path, CONFIG['dns_konfiguration'])
+        subprocess.run(['systemctl', 'restart', 'dnsmasq'])
+        return
+
+    # Prüfen, ob sich die neue Konfiguration von der bestehenden unterscheidet
+    if not filecmp.cmp(temp_conf_path, CONFIG['dns_konfiguration']):
+        log("dnsmasq-Konfiguration hat sich geändert. Erstelle neu und starte dnsmasq.")
+        os.replace(temp_conf_path, CONFIG['dns_konfiguration'])
+        subprocess.run(['systemctl', 'restart', 'dnsmasq'])
+    else:
+        log("Keine Änderungen in der dnsmasq-Konfiguration. Neustart wird übersprungen.")
+        os.remove(temp_conf_path)
+
+def sortiere_domains(domains):
+    """Sortiert die Domains numerisch und alphabetisch."""
+    return sorted(domains, key=lambda x: (x.split('.')[-1], x))
+
+def erstelle_hosts_datei(domains):
+    """Erstellt die Hosts-Datei."""
+    log("Beginne mit der Erstellung der hosts.txt Datei")
+    hosts_datei_pfad = os.path.join(skript_verzeichnis, 'hosts.txt')
+    with open(hosts_datei_pfad, 'w') as hosts_file:
+        for domain in sortiere_domains(domains):
+            hosts_file.write(f"0.0.0.0 {domain}\n")
+    log("Hosts-Datei erstellt")
 
 # =============================================================================
 # 5. FORTSCHRITTS- UND KONFIGURATIONSMANAGEMENT
@@ -328,6 +442,28 @@ def bereinige_obsolete_dateien():
             except Exception as e:
                 log(f"Fehler beim Löschen der Datei {dateipfad}: {e}", logging.ERROR)
 
+def aktualisiere_hosts_sources():
+    """Aktualisiert die Liste der Hosts-Quellen basierend auf Änderungen."""
+    with open(os.path.join(skript_verzeichnis, 'hosts_sources.conf')) as f:
+        aktuelle_urls = {line.strip() for line in f if line.strip() and not line.startswith('#')}
+
+    gespeicherte_urls = set(lade_domain_md5().keys())
+    neue_urls = aktuelle_urls - gespeicherte_urls
+    entfernte_urls = gespeicherte_urls - aktuelle_urls
+
+    # Neue URLs initialisieren
+    for url in neue_urls:
+        log(f"Neue URL gefunden: {url}. Initialisierung...")
+        extrahiere_domains_aus_liste(url)
+
+    # Entfernte URLs bereinigen
+    for url in entfernte_urls:
+        log(f"URL entfernt: {url}. Bereinige zugehörige Daten...")
+        domain_md5 = lade_domain_md5()
+        if url in domain_md5:
+            del domain_md5[url]
+        speichere_domain_md5(domain_md5)
+
 # =============================================================================
 # 8. DNS UND DOMAIN-VALIDIERUNG
 # =============================================================================
@@ -355,12 +491,22 @@ def test_dns_entry(domain, record_type='A'):
                     return False
                 time.sleep(CONFIG.get("retry_delay", 2))
     except Exception as e:
-        log(f"Allgemeiner Fehler beim Testen von {domain} ({record_type}): {e}", logging.ERROR)
+        log(f"Allgemeiner Fehler beim Testen von {domain} ({record_type}): {e}", logging.DEBUG)
         return False
 
 # =============================================================================
 # 9. BATCH-VERARBEITUNG UND DOMAIN-EXTRAKTION
 # =============================================================================
+
+def messen(func):
+    """Dekorator zum Messen der Laufzeit einer Funktion."""
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        print(f"Die Funktion '{func.__name__}' dauerte {end_time - start_time:.2f} Sekunden.")
+        return result
+    return wrapper
 
 @messen
 def teste_domains_batch(domains):
@@ -393,7 +539,7 @@ def teste_domains_batch(domains):
                     if not reachable and CONFIG.get("speichere_nicht_erreichbare", False):
                         speichere_nicht_erreichbare_domains(domain, os.path.join(skript_verzeichnis, 'nicht_erreichbare.txt'))
                 except Exception as e:
-                    log(f"Fehler beim Testen der Domain {domain}: {e}", logging.WARNING)
+                    log(f"Fehler beim Testen der Domain {domain}: {e}", logging.DEBUG)
                     results[domain] = False
 
         batch_index += batch_size
@@ -420,8 +566,30 @@ def extrahiere_domains_aus_liste(url):
     """Extrahiert Domains aus einer Hosts-Datei und ordnet sie der jeweiligen Liste zu."""
     try:
         log(f"Beginne Extrahieren der Domains von {url}")
-        bereinige_obsolete_dateien()
+        domain_md5 = lade_domain_md5()
 
+        # Prüfe, ob die Liste geändert wurde
+        if url in domain_md5:
+            saved_md5 = domain_md5[url]['md5']
+            log(f"Prüfe, ob sich die Liste {url} geändert hat...")
+            retries = CONFIG.get("max_retries", 3)
+            for versuch in range(retries):
+                try:
+                    # Nutze If-None-Match, wenn der Server ETags unterstützt
+                    response = requests.get(url, headers={"If-None-Match": saved_md5}, timeout=10)
+                    if response.status_code == 304:  # Liste ist unverändert
+                        log(f"Keine Änderungen in {url}, überspringe Verarbeitung.")
+                        return url, domain_md5[url]['domains'], saved_md5
+                    break
+                except requests.exceptions.RequestException as e:
+                    log(f"Fehler bei Anfrage {url} (Versuch {versuch+1}/{retries}): {e}", logging.WARNING)
+                    if versuch == retries - 1:
+                        raise
+                    time.sleep(CONFIG.get("retry_delay", 5))
+        else:
+            log(f"Keine gespeicherte MD5-Prüfsumme für {url}. Starte Download.")
+
+        # Liste herunterladen
         retries = CONFIG.get("max_retries", 3)
         for versuch in range(retries):
             try:
@@ -433,15 +601,16 @@ def extrahiere_domains_aus_liste(url):
                 if versuch == retries - 1:
                     raise
                 time.sleep(CONFIG.get("retry_delay", 5))
-        
+
         content = response.text
         current_md5 = berechne_md5(content)
-        domain_md5 = lade_domain_md5()
 
+        # Prüfen, ob sich die Liste geändert hat
         if url in domain_md5 and domain_md5[url]['md5'] == current_md5:
-            log(f"Keine Änderungen in {url}, überspringe Verarbeitung")
-            return url, {"domains": domain_md5[url]['domains'], "md5": current_md5}
+            log(f"Keine Änderungen in {url}, überspringe Verarbeitung.")
+            return url, domain_md5[url]['domains'], current_md5
 
+        # Domains extrahieren
         lines = content.splitlines()
         domains = set()
         for line in lines:
@@ -455,6 +624,7 @@ def extrahiere_domains_aus_liste(url):
                 if ist_gueltige_domain(domain):
                     domains.add(domain)
 
+        # Aktualisiere die gespeicherte MD5-Prüfsumme und die Domains
         domain_md5[url] = {"md5": current_md5, "domains": list(domains)}
         speichere_domain_md5(domain_md5)
         speichere_liste_temporär(url, domains)
@@ -563,7 +733,7 @@ def speichere_bewertung():
     log(f"Bewertung der Listen in {bewertung_datei} gespeichert.", logging.INFO)
 
 # =============================================================================
-# 13. STATISTIKAKTUALISIERUNG
+# 13. STATISTIKAKTUALISIERUNG UND EMAIL
 # =============================================================================
 
 def aktualisiere_gesamtstatistik():
@@ -626,6 +796,19 @@ def erstelle_email_text():
         email_text += f"    Bewertung: {wert}\n\n"
 
     return email_text
+
+def sende_email(betreff, text, fehler=False):
+    """Sendet eine E-Mail mit dem gegebenen Betreff und Text."""
+    if CONFIG.get('send_email', False):
+        try:
+            EMAIL = CONFIG['email']
+            ABSENDER = CONFIG['email_absender']
+            nachricht = f"Subject: {betreff}\nFrom: {ABSENDER}\nTo: {EMAIL}\n\n{text}"
+            p = subprocess.Popen(["/usr/sbin/sendmail", "-t"], stdin=subprocess.PIPE)
+            p.communicate(nachricht.encode())
+            log(f"E-Mail gesendet an {EMAIL}: {betreff}")
+        except Exception as e:
+            log(f"Fehler beim Senden der E-Mail: {e}", logging.ERROR)
 
 # =============================================================================
 # 14. HAUPTPROZESS
