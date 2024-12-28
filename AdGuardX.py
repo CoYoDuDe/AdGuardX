@@ -590,19 +590,55 @@ def ist_gueltige_domain(domain):
     return bool(domain_regex.match(domain))
 
 def test_dns_entry(domain, record_type='A'):
-    """Testet einen spezifischen DNS-Eintragstyp für eine Domain mit Wiederholungslogik."""
+    """
+    Testet einen spezifischen DNS-Eintragstyp für eine Domain mit Fallback-Logik (z. B. AAAA bei A-Fehlern),
+    Caching, Wiederholungslogik und Resolver-Fallback.
+    """
+    global DNS_CACHE, dns_cache_lock
+
+    # Überprüfen, ob die Domain bereits im Cache vorhanden ist
+    with dns_cache_lock:
+        if domain in DNS_CACHE:
+            log(f"Domain {domain} aus Cache geladen: {DNS_CACHE[domain]}", logging.DEBUG)
+            return DNS_CACHE[domain]
+
     resolver = dns.resolver.Resolver()
     resolver.nameservers = CONFIG['dns_server_list']
-    max_retries = CONFIG.get("max_retries", 3)  # Nutzen Sie den Wert aus der Konfiguration
-    for attempt in range(max_retries):
-        try:
-            resolver.resolve(domain, record_type, lifetime=CONFIG.get('domain_timeout', 5))
-            return True
-        except (dns.resolver.Timeout, dns.resolver.NXDOMAIN) as e:
-            log(f"DNS-Fehler bei {domain} (Versuch {attempt + 1}/{max_retries}): {e}", logging.DEBUG)
+    max_retries = CONFIG.get("max_retries", 3)
+    retry_delay = CONFIG.get("retry_delay", 5)
+
+    # Definiere die Reihenfolge der Tests: Erst A, dann AAAA
+    record_types = [record_type, 'AAAA'] if record_type == 'A' else [record_type]
+
+    for record in record_types:
+        for attempt in range(max_retries):
+            try:
+                resolver.resolve(domain, record, lifetime=CONFIG.get('domain_timeout', 5))
+                with dns_cache_lock:
+                    DNS_CACHE[domain] = True
+                log(f"Domain {domain} erfolgreich getestet mit {record}-Record.", logging.INFO)
+                return True
+            except dns.resolver.Timeout:
+                log(f"Timeout für {domain} bei {record}-Record (Versuch {attempt + 1}/{max_retries}).", logging.WARNING)
+            except dns.resolver.NXDOMAIN:
+                log(f"Domain {domain} existiert nicht (NXDOMAIN) für {record}-Record.", logging.INFO)
+                break  # Kein weiterer Versuch, wenn Domain nicht existiert
+            except Exception as e:
+                log(f"Unbekannter Fehler bei {domain} für {record}-Record (Versuch {attempt + 1}/{max_retries}): {e}", logging.ERROR)
+
+            # Resolver-Fallback
+            resolver.nameservers = resolver.nameservers[1:] + resolver.nameservers[:1]
+            log(f"Wechsle Resolver zu {resolver.nameservers[0]}.", logging.DEBUG)
+
+            # Wartezeit vor dem nächsten Versuch
             if attempt < max_retries - 1:
-                time.sleep(CONFIG.get("retry_delay", 2))
-    log(f"DNS-Test für {domain} nach {max_retries} Versuchen fehlgeschlagen.", logging.DEBUG)
+                time.sleep(retry_delay)
+
+        log(f"{record}-Record für {domain} nach {max_retries} Versuchen fehlgeschlagen.", logging.WARNING)
+
+    # Wenn kein Record erfolgreich getestet werden konnte, speichere im Cache
+    with dns_cache_lock:
+        DNS_CACHE[domain] = False
     return False
 
 # =============================================================================
@@ -772,6 +808,39 @@ def lade_bewertung():
         log(f"Fehler beim Laden der Bewertung aus {bewertung_datei}: {e}", logging.ERROR)
         return []
 
+def berechne_ideal_intervall(liste_statistiken):
+    """
+    Berechnet das ideale Intervall für die Skriptausführung basierend auf der Änderungsfrequenz und Wichtigkeit der Listen.
+    :param liste_statistiken: Liste mit Statistikdaten der Listen.
+                              [
+                                  {"url": "http://example.com", "änderungen_pro_jahr": 12, "domains": 100, "effizienz": 0.85},
+                                  ...
+                              ]
+    :return: Empfohlenes Intervall in Tagen.
+    """
+    mindest_intervall = 7  # Minimum 1-mal pro Woche
+    maximal_intervall = 90  # Maximum alle 3 Monate
+
+    gewichtet_summen = []
+    for liste in liste_statistiken:
+        # Durchschnittliche Änderungsfrequenz in Tagen
+        durchschnitts_intervall = 365 / liste["änderungen_pro_jahr"]
+
+        # Berechne die Wichtigkeit der Liste
+        wichtigkeit = liste["domains"] * liste["effizienz"]
+
+        # Gewichteter Intervall
+        gewichteter_intervall = durchschnitts_intervall / max(wichtigkeit, 1)
+        gewichtet_summen.append(gewichteter_intervall)
+
+    # Berechne das globale Intervall (z. B. Mittelwert, Median oder Minimum)
+    global_intervall = sum(gewichtet_summen) / len(gewichtet_summen) if gewichtet_summen else maximal_intervall
+
+    # Begrenzen des Intervalls
+    global_intervall = max(mindest_intervall, min(maximal_intervall, global_intervall))
+
+    return round(global_intervall)
+
 # =============================================================================
 # 13. STATISTIKAKTUALISIERUNG UND EMAIL
 # =============================================================================
@@ -788,6 +857,31 @@ def aktualisiere_gesamtstatistik():
     }
     STATISTIK.setdefault("gesamtstatistik", []).append(laufstatistik)
 
+def aktualisiere_intervall_statistik(domains_dict):
+    """
+    Erstellt Statistiken über die Änderungsfrequenzen der Listen und berechnet den idealen Intervall.
+    """
+    listen_statistiken = []
+    for url, daten in domains_dict.items():
+        änderungen_pro_jahr = len(daten["domains"]) / (STATISTIK.get("gesamt_domains", 1)) * 12  # Beispielannahme
+        domains = len(daten["domains"])
+        effizienz = domains / (domains + STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0))
+
+        listen_statistiken.append({
+            "url": url,
+            "änderungen_pro_jahr": änderungen_pro_jahr,
+            "domains": domains,
+            "effizienz": effizienz
+        })
+
+    # Berechne den idealen Intervall
+    idealer_intervall = berechne_ideal_intervall(listen_statistiken)
+    log(f"Berechneter idealer Intervall: {idealer_intervall} Tage.", logging.INFO)
+
+    # Speichere Intervall in der Statistik
+    STATISTIK["empfohlener_intervall"] = idealer_intervall
+    return idealer_intervall
+
 def erstelle_email_text():
     """Erstellt den Text der E-Mail-Benachrichtigung."""
     status = "Erfolgreich" if not STATISTIK["durchlauf_fehlgeschlagen"] else "Fehlgeschlagen"
@@ -797,6 +891,9 @@ def erstelle_email_text():
     
     if STATISTIK["durchlauf_fehlgeschlagen"]:
         email_text += f"Fehlermeldung: {fehlermeldung}\n\n"
+        email_text += "Folgende Listen haben Fehler verursacht:\n"
+        for url, count in STATISTIK["nicht_erreichbare_pro_liste"].items():
+            email_text += f"- {url}: {count} nicht erreichbare Domains\n"
 
     # Gesamtstatistik aller Läufe
     email_text += "Gesamtstatistik:\n"
@@ -810,6 +907,9 @@ def erstelle_email_text():
     }
     for key, value in gesamt_statistik.items():
         email_text += f"{key.replace('_', ' ').capitalize()}: {value}\n"
+
+    # Empfohlener Intervall
+    email_text += f"\nEmpfohlener Intervall für die nächste Ausführung: {STATISTIK.get('empfohlener_intervall', 'N/A')} Tage\n"
 
     # Aktuelle Laufstatistik
     email_text += "\nStatistik des aktuellen Laufs:\n"
@@ -876,6 +976,10 @@ def hauptprozess():
 
         # Leere Listen entfernen
         domains_dict = pruefe_und_entferne_leere_listen(domains_dict)
+
+        # Intervall berechnen und in die Log schreiben
+        idealer_intervall = aktualisiere_intervall_statistik(domains_dict)
+        log(f"Empfohlener Intervall für die nächste Ausführung: {idealer_intervall} Tage.", logging.INFO)
 
         # Alle Domains sammeln
         alle_domains = set(domain for data in domains_dict.values() for domain in data["domains"])
