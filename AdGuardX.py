@@ -865,7 +865,9 @@ def aktualisiere_intervall_statistik(domains_dict):
     for url, daten in domains_dict.items():
         änderungen_pro_jahr = len(daten["domains"]) / (STATISTIK.get("gesamt_domains", 1)) * 12  # Beispielannahme
         domains = len(daten["domains"])
-        effizienz = domains / (domains + STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0))
+        effizienz = 0  
+        if domains + STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0) > 0:
+            effizienz = domains / (domains + STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0))
 
         listen_statistiken.append({
             "url": url,
