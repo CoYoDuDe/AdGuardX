@@ -440,27 +440,130 @@ def bereinige_obsolete_dateien():
             except Exception as e:
                 log(f"Fehler beim Löschen der Datei {dateipfad}: {e}", logging.ERROR)
 
-def aktualisiere_hosts_sources():
-    """Aktualisiert die Liste der Hosts-Quellen basierend auf Änderungen."""
+def extrahiere_domains_aus_liste(url):
+    """
+    Extrahiert Domains aus einer Hosts-Datei von der angegebenen URL.
+    Prüft, ob sich die Liste geändert hat, und aktualisiert nur bei Bedarf.
+    """
+    try:
+        log(f"Beginne Extrahieren der Domains von {url}")
+        domain_md5 = lade_domain_md5()
+
+        # Prüfe, ob die Liste aktualisiert werden muss
+        if url in domain_md5:
+            saved_md5 = domain_md5[url]['md5']
+            log(f"Prüfe, ob sich die Liste {url} geändert hat...")
+            retries = CONFIG.get("max_retries", 3)
+            for versuch in range(retries):
+                try:
+                    response = requests.get(url, headers={"If-None-Match": saved_md5}, timeout=10)
+                    if response.status_code == 304:  # Liste ist unverändert
+                        log(f"Keine Änderungen in {url}, überspringe Verarbeitung. ({len(domain_md5[url]['domains'])} Domains)")
+                        return url, domain_md5[url]['domains'], saved_md5
+                    break
+                except requests.exceptions.RequestException as e:
+                    log(f"Fehler bei Anfrage {url} (Versuch {versuch+1}/{retries}): {e}", logging.WARNING)
+                    if versuch == retries - 1:
+                        raise
+                    time.sleep(CONFIG.get("retry_delay", 5))
+        else:
+            log(f"Keine gespeicherte MD5-Prüfsumme für {url}. Starte Download.")
+
+        # Liste herunterladen
+        retries = CONFIG.get("max_retries", 3)
+        for versuch in range(retries):
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                break
+            except requests.exceptions.RequestException as e:
+                log(f"Fehler bei Anfrage {url} (Versuch {versuch+1}/{retries}): {e}", logging.WARNING)
+                if versuch == retries - 1:
+                    raise
+                time.sleep(CONFIG.get("retry_delay", 5))
+
+        content = response.text
+        current_md5 = berechne_md5(content)
+
+        # Prüfen, ob sich die Liste geändert hat
+        if url in domain_md5 and domain_md5[url]['md5'] == current_md5:
+            log(f"Keine Änderungen in {url}, überspringe Verarbeitung. ({len(domain_md5[url]['domains'])} Domains)")
+            return url, domain_md5[url]['domains'], current_md5
+
+        # Domains extrahieren
+        lines = content.splitlines()
+        domains = set()
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            teile = line.split()
+            if len(teile) > 1 and re.match(r"^\d{1,3}(\.\d{1,3}){3}$", teile[0]):
+                domain = teile[1].strip()
+                domain = re.sub(r'^www\.', '', domain)
+                if ist_gueltige_domain(domain):
+                    domains.add(domain)
+
+        log(f"Extrahierte {len(domains)} Domains aus {url}")
+        return url, domains, current_md5
+
+    except Exception as e:
+        log(f"Fehler beim Extrahieren der Domains von {url}: {e}", logging.ERROR)
+        STATISTIK["fehlerhafte_lists"] += 1
+        return url, set(), None
+
+def aktualisiere_und_verarbeite_hosts_sources():
+    """
+    Prüft auf Änderungen in den Hosts-Quellen, verarbeitet neue/geänderte Listen,
+    entfernt nicht mehr vorhandene URLs und extrahiert Domains parallel mit ThreadPoolExecutor.
+    """
+    # Lade aktuelle URLs aus der hosts_sources.conf
     with open(os.path.join(skript_verzeichnis, 'hosts_sources.conf')) as f:
         aktuelle_urls = {line.strip() for line in f if line.strip() and not line.startswith('#')}
 
-    gespeicherte_urls = set(lade_domain_md5().keys())
+    # Lade gespeicherte MD5-Hashes
+    domain_md5 = lade_domain_md5()
+    gespeicherte_urls = set(domain_md5.keys())
+
+    # Neue und entfernte URLs ermitteln
     neue_urls = aktuelle_urls - gespeicherte_urls
     entfernte_urls = gespeicherte_urls - aktuelle_urls
-
-    # Neue URLs initialisieren
-    for url in neue_urls:
-        log(f"Neue URL gefunden: {url}. Initialisierung...")
-        extrahiere_domains_aus_liste(url)
 
     # Entfernte URLs bereinigen
     for url in entfernte_urls:
         log(f"URL entfernt: {url}. Bereinige zugehörige Daten...")
-        domain_md5 = lade_domain_md5()
-        if url in domain_md5:
-            del domain_md5[url]
-        speichere_domain_md5(domain_md5)
+        del domain_md5[url]
+
+    # Speichere die aktualisierten MD5-Daten
+    speichere_domain_md5(domain_md5)
+
+    # Domains parallel extrahieren
+    domains_dict = {}
+    with ThreadPoolExecutor(max_workers=CONFIG.get('max_parallel_jobs', 10)) as executor:
+        futures = {executor.submit(extrahiere_domains_aus_liste, url): url for url in aktuelle_urls}
+        for future in concurrent.futures.as_completed(futures):
+            url = futures[future]
+            try:
+                # Ergebnis von `extrahiere_domains_aus_liste` abrufen
+                _, domains, current_md5 = future.result()
+                
+                # Prüfe, ob die Liste geändert wurde (falls nicht, speichere nur vorhandene Domains)
+                if url in domain_md5 and domain_md5[url]['md5'] == current_md5:
+                    log(f"Keine Änderungen in {url}. Vorhandene Domains werden verwendet.")
+                    domains_dict[url] = {"domains": domain_md5[url]["domains"], "md5": current_md5}
+                else:
+                    # Liste hat sich geändert oder ist neu
+                    log(f"Liste aktualisiert oder neu: {url}. Extrahiere Domains.")
+                    domains_dict[url] = {"domains": domains, "md5": current_md5}
+                    domain_md5[url] = {"domains": list(domains), "md5": current_md5}
+            except Exception as e:
+                log(f"Fehler beim Verarbeiten von {url}: {e}", logging.ERROR)
+                STATISTIK["fehlerhafte_lists"] += 1
+
+    # Speichere die neuen MD5-Daten nach Abschluss der Verarbeitung
+    speichere_domain_md5(domain_md5)
+
+    return domains_dict
 
 # =============================================================================
 # 8. DNS UND DOMAIN-VALIDIERUNG
@@ -561,81 +664,6 @@ def test_single_or_batch(domain, resolver_index):
         except Exception as second_error:
             log(f"Zweiter Fehler beim Testen von {domain} mit anderem Resolver: {second_error}", logging.ERROR)
             return False
-
-def extrahiere_domains_aus_liste(url):
-    """Extrahiert Domains aus einer Hosts-Datei und ordnet sie der jeweiligen Liste zu."""
-    try:
-        log(f"Beginne Extrahieren der Domains von {url}")
-        domain_md5 = lade_domain_md5()
-
-        # Prüfe, ob die Liste geändert wurde
-        if url in domain_md5:
-            saved_md5 = domain_md5[url]['md5']
-            log(f"Prüfe, ob sich die Liste {url} geändert hat...")
-            retries = CONFIG.get("max_retries", 3)
-            for versuch in range(retries):
-                try:
-                    # Nutze If-None-Match, wenn der Server ETags unterstützt
-                    response = requests.get(url, headers={"If-None-Match": saved_md5}, timeout=10)
-                    if response.status_code == 304:  # Liste ist unverändert
-                        log(f"Keine Änderungen in {url}, überspringe Verarbeitung.")
-                        return url, domain_md5[url]['domains'], saved_md5
-                    break
-                except requests.exceptions.RequestException as e:
-                    log(f"Fehler bei Anfrage {url} (Versuch {versuch+1}/{retries}): {e}", logging.WARNING)
-                    if versuch == retries - 1:
-                        raise
-                    time.sleep(CONFIG.get("retry_delay", 5))
-        else:
-            log(f"Keine gespeicherte MD5-Prüfsumme für {url}. Starte Download.")
-
-        # Liste herunterladen
-        retries = CONFIG.get("max_retries", 3)
-        for versuch in range(retries):
-            try:
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                break
-            except requests.exceptions.RequestException as e:
-                log(f"Fehler bei Anfrage {url} (Versuch {versuch+1}/{retries}): {e}", logging.WARNING)
-                if versuch == retries - 1:
-                    raise
-                time.sleep(CONFIG.get("retry_delay", 5))
-
-        content = response.text
-        current_md5 = berechne_md5(content)
-
-        # Prüfen, ob sich die Liste geändert hat
-        if url in domain_md5 and domain_md5[url]['md5'] == current_md5:
-            log(f"Keine Änderungen in {url}, überspringe Verarbeitung.")
-            return url, domain_md5[url]['domains'], current_md5
-
-        # Domains extrahieren
-        lines = content.splitlines()
-        domains = set()
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            teile = line.split()
-            if len(teile) > 1 and re.match(r"^\d{1,3}(\.\d{1,3}){3}$", teile[0]):
-                domain = teile[1].strip()
-                domain = re.sub(r'^www\.', '', domain)
-                if ist_gueltige_domain(domain):
-                    domains.add(domain)
-
-        # Aktualisiere die gespeicherte MD5-Prüfsumme und die Domains
-        domain_md5[url] = {"md5": current_md5, "domains": list(domains)}
-        speichere_domain_md5(domain_md5)
-        speichere_liste_temporär(url, domains)
-
-        log(f"Extrahierte {len(domains)} Domains aus {url}")
-        return url, domains, current_md5
-
-    except Exception as e:
-        log(f"Fehler beim Extrahieren der Domains von {url}: {e}", logging.ERROR)
-        STATISTIK["fehlerhafte_lists"] += 1
-        return url, set(), None
 
 # =============================================================================
 # 1. DATENVERARBEITUNG UND DUPLIKATMANAGEMENT
@@ -828,23 +856,8 @@ def hauptprozess():
         if CONFIG['github_upload']:
             setup_git()
 
-        # Hosts-Quellen aktualisieren
-        aktualisiere_hosts_sources()
-        with open(os.path.join(skript_verzeichnis, 'hosts_sources.conf')) as file:
-            urls = [line.strip() for line in file if line.strip() and not line.startswith("#")]
-
-        domains_dict = {}
-
-        # Domains aus den URLs extrahieren
-        with ThreadPoolExecutor(max_workers=CONFIG.get('max_parallel_jobs', 10)) as executor:
-            futures = {executor.submit(extrahiere_domains_aus_liste, url): url for url in urls}
-            for future in concurrent.futures.as_completed(futures):
-                url = futures[future]
-                try:
-                    _, domains, _ = future.result()
-                    domains_dict[url] = {"domains": domains, "md5": lade_domain_md5().get(url, {}).get("md5")}
-                except Exception as e:
-                    log(f"Fehler beim Extrahieren der Domains von {url}: {e}", logging.ERROR)
+        # Hosts-Quellen aktualisieren und verarbeiten
+        domains_dict = aktualisiere_und_verarbeite_hosts_sources()
 
         # Duplikate mit Priorität entfernen
         domains_dict = entferne_duplikate_mit_prioritaet(domains_dict)
