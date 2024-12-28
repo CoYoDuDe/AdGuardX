@@ -212,6 +212,10 @@ def lade_domain_md5():
         with open(os.path.join(skript_verzeichnis, 'tmp', 'domain_md5.json')) as json_datei:
             return json.load(json_datei)
     except FileNotFoundError:
+        log("domain_md5.json nicht gefunden, initialisiere neu.", logging.WARNING)
+        return {}
+    except json.JSONDecodeError:
+        log("domain_md5.json ist beschädigt, initialisiere neu.", logging.WARNING)
         return {}
 
 def sicher_speichern(dateipfad, inhalt, is_json=False):
@@ -336,28 +340,6 @@ def erstelle_hosts_datei(domains):
 # 5. FORTSCHRITTS- UND KONFIGURATIONSMANAGEMENT
 # =============================================================================
 
-def speichere_fortschritt(daten, dateipfad="fortschritt.json"):
-    """Speichert den Fortschritt in einer JSON-Datei."""
-    try:
-        sicher_speichern(os.path.join(skript_verzeichnis, dateipfad), daten, is_json=True)
-        log(f"Fortschrittsdaten gespeichert in {dateipfad}.", logging.INFO)
-    except Exception as e:
-        log(f"Fehler beim Speichern der Fortschrittsdaten: {e}", logging.ERROR)
-
-def lade_fortschritt(dateipfad="fortschritt.json"):
-    """Lädt den gespeicherten Fortschritt aus einer JSON-Datei."""
-    try:
-        with open(os.path.join(skript_verzeichnis, dateipfad), 'r') as file:
-            daten = json.load(file)
-        log(f"Fortschrittsdaten geladen aus {dateipfad}.", logging.INFO)
-        return daten
-    except FileNotFoundError:
-        log("Keine Fortschrittsdaten gefunden. Beginne neu.", logging.INFO)
-        return {}
-    except Exception as e:
-        log(f"Fehler beim Laden der Fortschrittsdaten: {e}", logging.ERROR)
-        return {}
-
 def lade_konfiguration(dateipfad):
     """Lädt und validiert die Konfiguration mit JSON-Validierung."""
     try:
@@ -426,17 +408,29 @@ def erstelle_standard_datei(dateipfad, inhalt=None, leer=False):
 
 def initialisiere_verzeichnisse_und_dateien():
     """Überprüft und erstellt notwendige Verzeichnisse und Dateien."""
-    os.makedirs(os.path.join(skript_verzeichnis, 'tmp'), exist_ok=True)
-    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'config.json'), STANDARD_CONFIG)
-    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'tmp', 'statistik.json'), STATISTIK)
-    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'hosts_sources.conf'), STANDARD_HOSTS_SOURCES)
-    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'tmp', 'domain_md5.json'), {})
-    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'whitelist.txt'), leer=True)
-    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'blacklist.txt'), leer=True)
-    erstelle_standard_datei(os.path.join(skript_verzeichnis, 'tmp', 'bewertung.json'), [])
+    tmp_dir = os.path.join(skript_verzeichnis, 'tmp')
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    # Überprüfe, ob Dateien fehlen und lege sie an
+    fehlende_dateien = [
+        ('config.json', STANDARD_CONFIG),
+        ('tmp/statistik.json', STATISTIK),
+        ('hosts_sources.conf', STANDARD_HOSTS_SOURCES),
+        ('tmp/domain_md5.json', {}),
+        ('whitelist.txt', ''),
+        ('blacklist.txt', ''),
+        ('tmp/bewertung.json', [])
+    ]
+    for rel_path, inhalt in fehlende_dateien:
+        dateipfad = os.path.join(skript_verzeichnis, rel_path)
+        if not os.path.exists(dateipfad):
+            sicher_speichern(dateipfad, inhalt, is_json=not isinstance(inhalt, str))
 
 def bereinige_obsolete_dateien():
     """Bereinigt veraltete oder ungenutzte temporäre Dateien im tmp-Verzeichnis."""
+    global DNS_CACHE
+    DNS_CACHE.clear()  
+
     temp_verzeichnis = os.path.join(skript_verzeichnis, 'tmp')
     aktuelle_urls = set(lade_domain_md5().keys())
 
@@ -616,15 +610,15 @@ def test_dns_entry(domain, record_type='A'):
                 resolver.resolve(domain, record, lifetime=CONFIG.get('domain_timeout', 5))
                 with dns_cache_lock:
                     DNS_CACHE[domain] = True
-                log(f"Domain {domain} erfolgreich getestet mit {record}-Record.", logging.INFO)
+                log(f"Domain {domain} erfolgreich getestet mit {record}-Record.", logging.DEBUG)
                 return True
             except dns.resolver.Timeout:
-                log(f"Timeout für {domain} bei {record}-Record (Versuch {attempt + 1}/{max_retries}).", logging.WARNING)
+                log(f"Timeout für {domain} bei {record}-Record (Versuch {attempt + 1}/{max_retries}).", logging.DEBUG)
             except dns.resolver.NXDOMAIN:
-                log(f"Domain {domain} existiert nicht (NXDOMAIN) für {record}-Record.", logging.INFO)
+                log(f"Domain {domain} existiert nicht (NXDOMAIN) für {record}-Record.", logging.DEBUG)
                 break  # Kein weiterer Versuch, wenn Domain nicht existiert
             except Exception as e:
-                log(f"Unbekannter Fehler bei {domain} für {record}-Record (Versuch {attempt + 1}/{max_retries}): {e}", logging.ERROR)
+                log(f"Unbekannter Fehler bei {domain} für {record}-Record (Versuch {attempt + 1}/{max_retries}): {e}", logging.DEBUG)
 
             # Resolver-Fallback
             resolver.nameservers = resolver.nameservers[1:] + resolver.nameservers[:1]
@@ -634,7 +628,7 @@ def test_dns_entry(domain, record_type='A'):
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
 
-        log(f"{record}-Record für {domain} nach {max_retries} Versuchen fehlgeschlagen.", logging.WARNING)
+        log(f"{record}-Record für {domain} nach {max_retries} Versuchen fehlgeschlagen.", logging.DEBUG)
 
     # Wenn kein Record erfolgreich getestet werden konnte, speichere im Cache
     with dns_cache_lock:
@@ -764,26 +758,35 @@ def pruefe_und_entferne_leere_listen(domains_dict):
 # =============================================================================
 
 def bewerte_listen():
-    """Bewertet die Hosts-Listen basierend auf den gesammelten Statistiken."""
+    """
+    Bewertet die Hosts-Listen basierend auf den gesammelten Statistiken.
+    """
     bewertung = []
     for url in STATISTIK["erreichbare_pro_liste"].keys():
-        STATISTIK.setdefault("erreichbare_pro_liste", defaultdict(int))[url] += 1
-        STATISTIK.setdefault("nicht_erreichbare_pro_liste", defaultdict(int))[url] += 1
-        STATISTIK.setdefault("duplikate_pro_liste", defaultdict(int))[url] += 1
+        erreichbar = STATISTIK["erreichbare_pro_liste"][url]
+        nicht_erreichbar = STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0)
+        duplikate = STATISTIK["duplikate_pro_liste"].get(url, 0)
 
         gesamt = erreichbar + nicht_erreichbar
-        effizient = erreichbar / gesamt if gesamt > 0 else 0
+        effizient = 0
+        if gesamt > 0:
+            effizient = erreichbar / gesamt  # Effizienz = Anteil erreichbarer Domains
+
+        # Bewertungswert: erreichbare Domains minus Probleme (duplikate + nicht erreichbar)
         wert = erreichbar - (duplikate + nicht_erreichbar)
+
         bewertung.append((url, gesamt, erreichbar, nicht_erreichbar, duplikate, effizient, wert))
 
+    # Sortieren nach dem Bewertungswert in absteigender Reihenfolge
     bewertung.sort(key=lambda x: x[-1], reverse=True)
 
-    # Entferne ineffiziente Listen
+    # Entferne ineffiziente oder leere Listen
     for item in bewertung:
-        if item[1] == 0 or item[-1] < 0:
-            log(f"Liste {item[0]} wird entfernt, da sie ineffizient ist.")
+        if item[1] == 0 or item[-1] < 0:  # Leere Listen oder negativ bewertete Listen
+            log(f"Liste {item[0]} wird entfernt, da sie ineffizient ist oder keine Domains enthält.")
             del STATISTIK["erreichbare_pro_liste"][item[0]]
 
+    # Speichere die Bewertung in der Statistik
     STATISTIK.setdefault("list_bewertung", []).extend(bewertung)
     return bewertung
 
@@ -863,24 +866,31 @@ def aktualisiere_intervall_statistik(domains_dict):
     """
     listen_statistiken = []
     for url, daten in domains_dict.items():
-        änderungen_pro_jahr = len(daten["domains"]) / (STATISTIK.get("gesamt_domains", 1)) * 12  # Beispielannahme
-        domains = len(daten["domains"])
-        effizienz = 0  
-        if domains + STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0) > 0:
-            effizienz = domains / (domains + STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0))
+        domains = len(daten["domains"])  # Anzahl der Domains in der Liste
+        nicht_erreichbar = STATISTIK["nicht_erreichbare_pro_liste"].get(url, 0)
 
+        # Effizienz: Anteil erreichbarer Domains
+        effizient = 0
+        gesamt = domains + nicht_erreichbar
+        if gesamt > 0:
+            effizient = domains / gesamt
+
+        # Standardwert für Änderungen pro Jahr, falls keine Daten verfügbar sind
+        änderungen_pro_jahr = daten.get("änderungen_pro_jahr", 12)  # Standard: 12 (monatliche Updates)
+
+        # Füge die Statistik hinzu
         listen_statistiken.append({
             "url": url,
             "änderungen_pro_jahr": änderungen_pro_jahr,
             "domains": domains,
-            "effizienz": effizienz
+            "effizienz": effizient,
         })
 
     # Berechne den idealen Intervall
     idealer_intervall = berechne_ideal_intervall(listen_statistiken)
     log(f"Berechneter idealer Intervall: {idealer_intervall} Tage.", logging.INFO)
 
-    # Speichere Intervall in der Statistik
+    # Speichere den Intervall in der Statistik
     STATISTIK["empfohlener_intervall"] = idealer_intervall
     return idealer_intervall
 
@@ -961,6 +971,10 @@ def hauptprozess():
     try:
         # Initialisieren
         initialisiere_verzeichnisse_und_dateien()
+
+        log("Bereinige temporäre Dateien und Cache vor dem Start...", logging.INFO)
+        bereinige_obsolete_dateien()
+
         global CONFIG
         CONFIG = lade_konfiguration(os.path.join(skript_verzeichnis, 'config.json'))
         konfiguriere_logging(CONFIG['log_datei'])
@@ -1030,6 +1044,9 @@ def hauptprozess():
 
         log("Hauptprozess erfolgreich abgeschlossen.", logging.INFO)
 
+        log("Bereinige temporäre Dateien nach erfolgreichem Durchlauf...", logging.INFO)
+        bereinige_obsolete_dateien()
+
     except Exception as e:
         fehler_beenden(f"Unerwarteter Fehler im Hauptprozess: {e}")
 
@@ -1047,4 +1064,3 @@ if __name__ == "__main__":
         hauptprozess()
     except Exception as e:
         fehler_beenden(f"Unerwarteter Fehler: {str(e)}")
-        
