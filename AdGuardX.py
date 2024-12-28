@@ -55,10 +55,8 @@ STANDARD_CONFIG = {
     "retry_delay": 5,
     "parallel_aktiviert": True,
     "max_parallel_jobs": 1,
-    "batching_aktiviert": True,
     "batch_größe": 1000,
     "dns_konfiguration": "/etc/dnsmasq.d/adguardx.conf",
-    "verwende_adblock_conf": True,
     "web_server_ipv4": "127.0.0.1",
     "web_server_ipv6": "::1",
     "github_upload": False,
@@ -541,6 +539,10 @@ def teste_domains_batch(domains):
                 except Exception as e:
                     log(f"Fehler beim Testen der Domain {domain}: {e}", logging.DEBUG)
                     results[domain] = False
+
+                # Fortschritts-Logging
+                if idx % CONFIG.get("progress_log_frequency", 1000) == 0:
+                    log(f"Fortschritt: {batch_index + idx}/{total_domains} Domains getestet", logging.INFO)
 
         batch_index += batch_size
         log(f"Batch abgeschlossen: {batch_index} von {total_domains} Domains verarbeitet.", logging.INFO)
