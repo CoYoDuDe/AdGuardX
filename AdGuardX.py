@@ -77,7 +77,6 @@ STANDARD_CONFIG = {
         "2606:4700:4700::1001"
     ],
     "logging_level": "INFO",
-    "progress_log_frequency": 1000,
     "detailed_log": False,
     "speichere_nicht_erreichbare": True,
     "priorisiere_listen": True,
@@ -611,42 +610,54 @@ def messen(func):
 
 @messen
 def teste_domains_batch(domains):
-    """Testet eine Liste von Domains in einem Batch mit dynamisch berechneten Ressourcen."""
+    """
+    Testet eine Liste von Domains in Batches, loggt Fortschritt und Ergebnisse
+    basierend auf der Batchgröße.
+    """
     results = {}
     resolver_index = random.randint(0, len(CONFIG['dns_server_list']) - 1)
     total_domains = len(domains)
     batch_index = 0
+    erreichbare_count = 0
+    nicht_erreichbare_count = 0
 
     while batch_index < total_domains:
         # Berechne dynamische Ressourcen
         batch_size = calculate_batch_size()
         max_jobs = calculate_dynamic_resources(total_domains)
         current_batch = domains[batch_index:batch_index + batch_size]
-        
+
         log(f"Starte Batch {batch_index // batch_size + 1} mit Größe {batch_size} und {max_jobs} parallelen Jobs.", logging.INFO)
 
         with ThreadPoolExecutor(max_workers=max_jobs) as executor:
             futures = {executor.submit(test_single_or_batch, domain, resolver_index): domain for domain in current_batch}
 
-            for future_index, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+            for future in concurrent.futures.as_completed(futures):
                 domain = futures[future]
                 try:
                     reachable = future.result()
                     results[domain] = reachable
-                    with dns_cache_lock:
-                        DNS_CACHE[domain] = reachable
-                    if not reachable and CONFIG.get("speichere_nicht_erreichbare", False):
-                        speichere_nicht_erreichbare_domains(domain, os.path.join(skript_verzeichnis, 'nicht_erreichbare.txt'))
+
+                    # Ergebnis speichern und zählen
+                    if reachable:
+                        erreichbare_count += 1
+                    else:
+                        nicht_erreichbare_count += 1
                 except Exception as e:
                     log(f"Fehler beim Testen der Domain {domain}: {e}", logging.DEBUG)
                     results[domain] = False
 
-                # Fortschritts-Logging
-                if future_index % CONFIG.get("progress_log_frequency", 1000) == 0:
-                    log(f"Fortschritt: {batch_index + future_index}/{total_domains} Domains getestet", logging.INFO)
-
         batch_index += batch_size
-        log(f"Batch abgeschlossen: {batch_index} von {total_domains} Domains verarbeitet.", logging.INFO)
+
+        # Fortschritts- und Ergebnis-Logging nach Abschluss des Batches
+        log(
+            f"Fortschritt: {batch_index}/{total_domains} Domains getestet (Batch abgeschlossen)",
+            logging.INFO
+        )
+        log(
+            f"Erreichbar: {erreichbare_count} | Nicht erreichbar: {nicht_erreichbare_count}",
+            logging.INFO
+        )
 
     return results
 
