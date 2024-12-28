@@ -1045,3 +1045,4 @@ if __name__ == "__main__":
         hauptprozess()
     except Exception as e:
         fehler_beenden(f"Unerwarteter Fehler: {str(e)}")
+        
