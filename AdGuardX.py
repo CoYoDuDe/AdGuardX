@@ -668,7 +668,7 @@ def teste_domains_batch(domains):
         max_jobs = calculate_dynamic_resources(total_domains)
         current_batch = domains[batch_index:batch_index + batch_size]
 
-        log(f"Starte Batch {batch_index // batch_size + 1} mit Größe {batch_size} und {max_jobs} parallelen Jobs.", logging.INFO)
+        log(f"Starte Batch {batch_index // batch_size + 1} von {(total_domains + batch_size - 1) // batch_size} mit Größe {batch_size} und {max_jobs} parallelen Jobs.", logging.INFO)
 
         with ThreadPoolExecutor(max_workers=max_jobs) as executor:
             futures = {executor.submit(test_single_or_batch, domain, resolver_index): domain for domain in current_batch}
