@@ -142,17 +142,6 @@ def update_batch_progress():
 def get_batch_progress():
     return jsonify(batch_progress)
 
-@app.route('/update_batch_progress', methods=['POST'])
-def update_batch_progress():
-    data = request.json
-    batch_progress["current"] = data.get("current", 0)
-    batch_progress["total"] = data.get("total", 0)
-    return jsonify({"message": "Progress updated"})
-
-@app.route('/get_batch_progress', methods=['GET'])
-def get_batch_progress():
-    return jsonify(batch_progress)
-
 @app.route('/dns_config', methods=['POST'])
 def dns_config():
     data = request.json
