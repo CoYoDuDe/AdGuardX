@@ -1,18 +1,33 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
-import threading
+from flask import Flask, jsonify, request
+from backend.core.domain_tester import start_domain_tests
+from backend.core.git_handler import push_to_git
+from backend.utils.logger import initialize_logger
 
-class AdBlockHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Blocked by AdGuardX!")
+app = Flask(__name__)
 
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    """Multithreaded HTTP Server."""
-    daemon_threads = True
+# Initialisiere das Logger
+initialize_logger()
 
-def start_http_server(port=8080):
-    server = ThreadedHTTPServer(("0.0.0.0", port), AdBlockHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"HTTP Server läuft auf Port {port}")
+@app.route('/start-tests', methods=['POST'])
+def start_tests():
+    data = request.get_json()
+    sources = data.get('sources', [])
+    if not sources:
+        return jsonify({"error": "No sources provided"}), 400
+    result = start_domain_tests(sources)
+    return jsonify({"message": "Tests started", "result": result}), 200
+
+@app.route('/push-to-git', methods=['POST'])
+def push_git():
+    message = request.get_json().get('message', 'Auto-commit')
+    push_to_git(message)
+    return jsonify({"message": "Changes pushed to Git"}), 200
+
+@app.route('/logs', methods=['GET'])
+def get_logs():
+    with open('logs/app.log', 'r') as log_file:
+        logs = log_file.read()
+    return jsonify({"logs": logs}), 200
+
+if __name__ == '__main__':
+    app.run(debug=True)
