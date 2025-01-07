@@ -1,8 +1,7 @@
-const apiUrl = 'http://127.0.0.1:5000/api/stats';
 
 document.addEventListener('DOMContentLoaded', () => {
     const statsDiv = document.getElementById('stats');
-    fetch(apiUrl)
+    fetch('http://127.0.0.1:5000/api/stats')
         .then(response => response.json())
         .then(data => {
             statsDiv.innerHTML = `

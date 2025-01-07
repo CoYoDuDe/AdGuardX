@@ -1,12 +1,12 @@
-
 {
   "name": "adguardx-frontend",
   "version": "1.0.0",
   "description": "Frontend for AdGuardX",
-  "main": "src/main.js",
-  "dependencies": {},
-  "devDependencies": {},
+  "main": "server.js",
   "scripts": {
-    "start": "node web/frontend/src/main.js"
+    "start": "node web/frontend/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
   }
 }
