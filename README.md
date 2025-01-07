@@ -1,19 +1,33 @@
-AdGuardX ist ein Open-Source-Projekt, das die Funktionen zur Werbeblockierung erweitert, indem es benutzerdefinierte Regeln, fortschrittliche Filterlogik und benutzerfreundliche Schnittstellen integriert. um ein maßgeschneidertes und effizienteres Werbeblockerlebnis zu bieten.
-Wichtige Funktionen von AdGuardX
 
-    Erweiterte Filterung: Nutzt benutzerdefinierte Filterregeln, um eine breite Palette von Werbung und Trackern zu blockieren, für ein sauberes Surferlebnis.
-    Benutzerfreundliches Interface: Bietet eine intuitive Oberfläche zur einfachen Konfiguration und Verwaltung der Einstellungen.
-    Open Source: Als Open-Source-Projekt ermöglicht es Gemeinschaftsbeiträge und Transparenz in der Entwicklung.
+# AdGuardX_Project
 
-Projektstruktur
+AdGuardX is a powerful modular system for managing network requests, DNS blocking, and filtering rules.
 
-    Backend: Verarbeitet die Kernfunktionen wie Werbeblockierungslogik und Filterverwaltung.
-    Frontend: Stellt die Benutzeroberfläche für die Interaktion mit der Anwendung bereit.
+## Features
+- HTTP/HTTPS filtering
+- DNS-based blocking and source list management
+- User-friendly web interface with Flask and Node.js
 
-Erste Schritte mit AdGuardX
+## Installation
+1. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Install Node.js dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the backend server:
+   ```bash
+   python run.py
+   ```
+4. Start the frontend development server (if required):
+   ```bash
+   npm start
+   ```
 
-    Installation: Repository klonen und den Anweisungen zur Einrichtung folgen.
-    Konfiguration: Filterregeln und Einstellungen anpassen.
-    Verwendung: Anwendung starten, um unerwünschte Werbung und Tracker zu blockieren.
+## Configuration
+- Edit `config/default_config.json` to customize settings for the HTTP/HTTPS server and DNS filtering.
 
-Detaillierte Informationen und die Möglichkeit zur Mitwirkung finden Sie im AdGuardX GitHub-Repository.
+## Web Interface
+Visit `http://127.0.0.1:5000` to access the AdGuardX Dashboard.

@@ -1,0 +1,9 @@
+
+{
+    "http_port": 8082,
+    "https_port": 8443,
+    "log_file": "logs/activity.log",
+    "dns_server_list": ["8.8.8.8", "1.1.1.1"],
+    "block_list": ["ads.js", "analytics.js"],
+    "allow_list": []
+}
